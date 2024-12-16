@@ -1,0 +1,57 @@
+# Infinite canvas note-taking app
+I was inspired by Rnote, but it lacked customizability so my goal is to create an altenative.
+
+(It currently only implements the input code for the ugee s640 stylus using evdev)
+
+## Current features:
+- **Infinite Scrolling / Zooming Canvas**:  
+  Allows you to pan (drag with stylus right-click or another button) and zoom (using mouse wheel) across an infinite plane.  
+  The canvas renders repeating A4 pages in the background for orientation.
+
+- **Pressure-Sensitive Drawing**:  
+  Integrates stylus input (pressure, stylus button) to draw variable-thickness lines.  
+
+- **Strokes with Smooth Catmull-Rom Spline algorithm**:  
+  After finishing a stroke, the points are processed using a Catmull-Rom spline to produce a smoother line.  
+  This creates a more refined drawing experience.
+
+- **Save/Load Functionality**:  
+  Press `Ctrl+S` to save your current strokes to a JSON file, and `Ctrl+O` to load them back.
+
+- **Eraser Tool**:  
+  Double-clicking the stylus button toggles between pen and eraser mode.  
+  In eraser mode, touching the screen erases strokes near the stylus position.
+
+## Controls
+- **Draw (Pen Tool)**:  
+  Apply pressure and move the stylus. The stroke thickness depends on pressure and current zoom.
+- **Toggle Eraser**:  
+  Double-click the stylus button.
+- **Pan**:  
+  Press and hold the stylus button and move the pen to drag the canvas.
+- **Zoom**:  
+  Use the mouse wheel to zoom in (scroll up) or out (scroll down). Zoom is clamped between 0.1 and 10.0.
+- **Clear Canvas**:  
+  Press `C` to clear all strokes.
+- **Save / Load**:  
+  `Ctrl+S` to save your current strokes to a JSON file.  
+  `Ctrl+O` to load previously saved JSON data.
+
+## Dependencies
+
+- **Macroquad**:  
+  As the graphics engine.
+- **Evdev / Stylus Input**:  
+  As input handling for the stylus.
+
+## Future Improvements
+
+- **Undo/Redo**:  
+  Must have for a working app.
+- **Brush Simulation**:  
+  Instead of simple lines, simulate a brush or pen nib for more organic strokes.
+- **Additional Tools & Settings**:  
+  Add UI elements to adjust simplification, spline segments, or toggle thickness logic.
+  Also to change the design of the A4 pages, or scale their Dimensions
+- **Exporting to pdf**:
+  There should be an option to export the canvas as a pdf. 
