@@ -207,3 +207,30 @@ pub(crate) fn stroke_to_screen_mesh_old(points: &[(Vec2, f32)], offset: Vec2, zo
         texture:None,
     })
 }
+
+
+pub(crate) fn stroke_bounding_box(points: &[(Vec2, f32)]) -> (f32, f32, f32, f32) {
+    let mut min_x = std::f32::MAX;
+    let mut max_x = std::f32::MIN;
+    let mut min_y = std::f32::MAX;
+    let mut max_y = std::f32::MIN;
+    for (pos, _) in points {
+        if pos.x < min_x { min_x = pos.x; }
+        if pos.x > max_x { max_x = pos.x; }
+        if pos.y < min_y { min_y = pos.y; }
+        if pos.y > max_y { max_y = pos.y; }
+    }
+    (min_x, max_x, min_y, max_y)
+}
+
+
+pub(crate) fn is_stroke_visible(stroke: &Stroke, offset: Vec2, zoom: f32, screen_w: f32, screen_h: f32) -> bool {
+    let (min_x, max_x, min_y, max_y) = stroke_bounding_box(&stroke.points);
+    let visible_left = offset.x;
+    let visible_top = offset.y;
+    let visible_right = offset.x + screen_w/zoom;
+    let visible_bottom = offset.y + screen_h/zoom;
+
+    // aabb
+    !(max_x < visible_left || min_x > visible_right || max_y < visible_top || min_y > visible_bottom)
+}

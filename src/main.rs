@@ -74,10 +74,13 @@ impl From<&Stroke> for StrokeData {
 
 struct InfiniteCanvas {
     strokes: Vec<Stroke>,
+    stroke_cache: Vec<Option<Mesh>>,
     current_stroke: Option<Stroke>,
     command_stack: CommandStack,
     offset: Vec2,
+    last_offset: Vec2,
     zoom: f32,
+    last_zoom: f32,
     current_pressure: f32,
     stylus_btn_1_pressed: bool,
     last_btn_1_press: Instant,
@@ -89,10 +92,13 @@ impl InfiniteCanvas {
     fn new() -> Self {
         let c= Self {
             strokes:Vec::new(),
+            stroke_cache:Vec::new(),
             current_stroke:None,
             command_stack: CommandStack::new(),
             offset:Vec2::ZERO,
+            last_offset: Vec2::ZERO,
             zoom:1.0,
+            last_zoom: 1.0,
             current_pressure:0.0,
             stylus_btn_1_pressed:false,
             last_btn_1_press:Instant::now()-Duration::from_secs(1),
@@ -117,8 +123,8 @@ impl InfiniteCanvas {
         let mut i=0;
         while i<self.strokes.len() {
             if stroke_intersect(&self.strokes[i], pos, radius) {
-                self.strokes.remove(i);
                 self.command_stack.push_undo(command::Command::RemoveStroke(self.strokes[i].clone()));
+                self.strokes.remove(i);
             } else {
                 i+=1;
             }
@@ -140,6 +146,7 @@ impl InfiniteCanvas {
             stroke.points = smoothed;
             self.command_stack.push_undo(command::Command::AddStroke(stroke.clone()));
             self.strokes.push(stroke);
+            self.stroke_cache.push(None);
         }
     }
 
@@ -215,25 +222,37 @@ impl InfiniteCanvas {
         }
     }
     
-    fn draw(&self) {
-        clear_background(WHITE);
-    
+    fn draw(&mut self) {
         let screen_w = screen_width();
         let screen_h = screen_height();
-    
+
+        let offset_changed = self.offset != self.last_offset;
+        let zoom_changed = (self.zoom - self.last_zoom).abs() > f32::EPSILON;
+
+        if offset_changed || zoom_changed {
+            // If offset or zoom changed, clear caches
+            for mesh_opt in &mut self.stroke_cache {
+                *mesh_opt = None;
+            }
+            self.last_offset = self.offset;
+            self.last_zoom = self.zoom;
+        }
+
+        clear_background(WHITE);
+
         let a4_w = 595.0;
         let a4_h = 842.0;
-    
+
         let visible_left = self.offset.x;
         let visible_top = self.offset.y;
         let visible_right = self.offset.x + screen_w/self.zoom;
         let visible_bottom = self.offset.y + screen_h/self.zoom;
-    
+
         let start_x = (visible_left/a4_w).floor() as i32 - 1;
         let end_x = (visible_right/a4_w).ceil() as i32 + 1;
         let start_y = (visible_top/a4_h).floor() as i32 - 1;
         let end_y = (visible_bottom/a4_h).ceil() as i32 + 1;
-    
+
         for x in start_x..=end_x {
             for y in start_y..=end_y {
                 let page_topleft_world = vec2(x as f32 * a4_w, y as f32 * a4_h);
@@ -241,24 +260,32 @@ impl InfiniteCanvas {
                 let py0 = (page_topleft_world.y - self.offset.y)*self.zoom;
                 let pw = a4_w * self.zoom;
                 let ph = a4_h * self.zoom;
-    
+
                 draw_rectangle_lines(px0, py0, pw, ph, 1.0, Color::new(0.0,0.0,0.0,0.5));
             }
         }
-    
-        for stroke in &self.strokes {
-            if let Some(mesh) = stroke_to_screen_mesh(&stroke.points, self.offset, self.zoom) {
-                draw_mesh(&mesh);
+
+        // Only render visible strokes
+        for (i, stroke) in self.strokes.iter().enumerate() {
+            if is_stroke_visible(stroke, self.offset, self.zoom, screen_w, screen_h) {
+                // If no cached mesh, build one now
+                if self.stroke_cache[i].is_none() {
+                    self.stroke_cache[i] = stroke_to_screen_mesh(&stroke.points, self.offset, self.zoom);
+                }
+
+                if let Some(ref mesh) = self.stroke_cache[i] {
+                    draw_mesh(mesh);
+                }
             }
         }
-    
+
         if let Some(stroke) = &self.current_stroke {
             for i in 0..stroke.points.len() {
                 let (pos, radius) = stroke.points[i];
                 let sx = (pos.x - self.offset.x)*self.zoom;
                 let sy = (pos.y - self.offset.y)*self.zoom;
                 draw_circle(sx, sy, radius*self.zoom, BLACK);
-    
+
                 if i + 1 < stroke.points.len() {
                     let (npos, nr) = stroke.points[i+1];
                     let nsx = (npos.x - self.offset.x)*self.zoom;
@@ -478,6 +505,7 @@ async fn main() {
         if canvas.stylus_btn_1_pressed {
             if let Some(last_pos)=canvas.last_stylus_screen_pos {
                 let delta=screen_pos-last_pos;
+                canvas.last_offset = canvas.offset;
                 canvas.offset -= delta*(1.0/canvas.zoom);
                 canvas.last_stylus_screen_pos=Some(screen_pos);
             } else {
@@ -488,6 +516,7 @@ async fn main() {
         let scroll=mouse_wheel().1;
         if scroll!=0.0 {
             let factor=if scroll>0.0 {1.1}else{0.9};
+            canvas.last_zoom = canvas.zoom;
             canvas.zoom*=factor;
             canvas.zoom=canvas.zoom.clamp(0.1,10.0);
         }
