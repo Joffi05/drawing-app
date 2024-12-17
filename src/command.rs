@@ -21,6 +21,11 @@ impl CommandStack {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.undo_stack = vec![];
+        self.redo_stack = vec![];
+    }
+
     pub fn push_undo(&mut self, comm: Command) {
         self.undo_stack.push(comm);
     }

@@ -14,7 +14,7 @@ pub enum StylusEvent {
 
 pub fn read_input(device_path: String, sender: Sender<StylusEvent>) {
     thread::spawn(move || {
-        let mut device = Device::open(device_path).expect("Konnte Gerät nicht öffnen");
+        let mut device = Device::open(device_path).expect("Could not open device");
 
         loop {
             match device.fetch_events() {
@@ -31,7 +31,7 @@ pub fn read_input(device_path: String, sender: Sender<StylusEvent>) {
                             },
                             InputEventKind::Key(key) => StylusEvent::Key { key, value: event.value() },
                             InputEventKind::Synchronization(_) => continue,
-                            _ => panic!("Anderes event: {:?}", event),
+                            _ => panic!("Unknown Event: {:?}", event),
                         };
                         if sender.send(stylus_event).is_err() {
                             // Empfänger wurde geschlossen
@@ -40,7 +40,7 @@ pub fn read_input(device_path: String, sender: Sender<StylusEvent>) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Fehler beim Abrufen der Ereignisse: {}", e);
+                    eprintln!("Error when getting event: {}", e);
                     thread::sleep(Duration::from_secs(1));
                 }
             }

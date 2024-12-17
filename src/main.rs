@@ -110,6 +110,7 @@ impl InfiniteCanvas {
     }
 
     fn clear(&mut self) {
+        self.stroke_cache.clear();
         self.strokes.clear();
     }
 
@@ -124,6 +125,7 @@ impl InfiniteCanvas {
         while i<self.strokes.len() {
             if stroke_intersect(&self.strokes[i], pos, radius) {
                 self.command_stack.push_undo(command::Command::RemoveStroke(self.strokes[i].clone()));
+                self.stroke_cache.remove(i);
                 self.strokes.remove(i);
             } else {
                 i+=1;
@@ -166,27 +168,38 @@ impl InfiniteCanvas {
     }
 
     fn load_from_json(&mut self) {
-        if let Some(path)=FileDialog::new().add_filter("json",&["json"]).pick_file() {
-            let mut file=File::open(path).unwrap();
-            let mut contents=String::new();
+        if let Some(path) = FileDialog::new().add_filter("json", &["json"]).pick_file() {
+            let mut file = File::open(path).unwrap();
+            let mut contents = String::new();
             file.read_to_string(&mut contents).unwrap();
-            let data:CanvasData=serde_json::from_str(&contents).unwrap();
-
+            let data: CanvasData = serde_json::from_str(&contents).unwrap();
+    
             self.strokes.clear();
             for sd in data.strokes {
-                let mut stroke=Stroke::new();
-                for (p,press) in sd.points {
-                    stroke.points.push((vec2(p[0],p[1]), press));
+                let mut stroke = Stroke::new();
+                for (p, press) in sd.points {
+                    stroke.points.push((vec2(p[0], p[1]), press));
                 }
                 self.strokes.push(stroke);
             }
-
-            self.tool_mode=data.tool_mode;
-            self.offset=vec2(data.offset[0],data.offset[1]);
-            self.zoom=data.zoom;
+    
+            self.tool_mode = data.tool_mode;
+            self.offset = vec2(data.offset[0], data.offset[1]);
+            self.zoom = data.zoom;
             self.update_cursor_icon();
+
+
+            // setup cache
+            self.stroke_cache.clear();
+            for _ in &self.strokes {
+                self.stroke_cache.push(None);
+            }
+
+            // setup undo-redo stack
+            self.command_stack.clear();
         }
     }
+    
 
     fn undo(&mut self) {
         if let Some(comm) = self.command_stack.pop_undo() {
@@ -194,33 +207,39 @@ impl InfiniteCanvas {
                 Command::AddStroke(stroke) => {
                     if let Some(idx) = self.strokes.iter().position(|s| *s == stroke) {
                         self.strokes.remove(idx);
+                        self.stroke_cache.remove(idx); 
                         self.command_stack.push_redo(Command::AddStroke(stroke));
                     }
                 }
                 Command::RemoveStroke(stroke) => {
                     self.strokes.push(stroke.clone());
+                    self.stroke_cache.push(None); 
                     self.command_stack.push_redo(Command::RemoveStroke(stroke));
                 }
             }
         }
     }
     
+    
     fn redo(&mut self) {
         if let Some(comm) = self.command_stack.pop_redo() {
             match comm {
                 Command::AddStroke(stroke) => {
                     self.strokes.push(stroke.clone());
+                    self.stroke_cache.push(None);
                     self.command_stack.push_undo(Command::AddStroke(stroke));
                 }
                 Command::RemoveStroke(stroke) => {
                     if let Some(idx) = self.strokes.iter().position(|s| *s == stroke) {
                         self.strokes.remove(idx);
+                        self.stroke_cache.remove(idx);
                         self.command_stack.push_undo(Command::RemoveStroke(stroke));
                     }
                 }
             }
         }
     }
+    
     
     fn draw(&mut self) {
         let screen_w = screen_width();
@@ -298,8 +317,6 @@ impl InfiniteCanvas {
 }
 
 
-
-
 // kp
 const CAP_SEGMENTS: usize = 8; 
 fn draw_cap(
@@ -357,7 +374,6 @@ fn draw_cap(
         });
     }
 
-    // Triangulate the fan
     for j in 0..CAP_SEGMENTS {
         let center_i = first_cap_index;
         let v1 = first_cap_index + 1 + j as u16;
@@ -462,7 +478,7 @@ pub(crate) fn stroke_to_screen_mesh(
 
 
 
-#[macroquad::main("Thickness scaling & stable transforms")]
+#[macroquad::main("Drawing App")]
 async fn main() {
     let (sender,receiver)=mpsc::channel();
     let stylus_device_path="/dev/input/event15".to_string();
