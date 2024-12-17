@@ -1,7 +1,9 @@
 mod read_stylus;
 mod mesh;
 mod utility;
+mod command;
 
+use command::{Command, CommandStack};
 use macroquad::prelude::*;
 use miniquad::window::set_mouse_cursor;
 use miniquad::CursorIcon;
@@ -11,6 +13,7 @@ use serde::{Serialize, Deserialize};
 use serde_json::{self};
 use std::fs::File;
 use std::io::{Write, Read};
+use std::ops::Index;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use utility::*;
@@ -54,6 +57,12 @@ impl Stroke {
     }
 }
 
+impl PartialEq for Stroke {
+    fn eq(&self, other: &Self) -> bool {
+        self.points == other.points
+    }
+}
+
 impl From<&Stroke> for StrokeData {
     fn from(stroke: &Stroke) -> Self {
         let points = stroke.points.iter()
@@ -66,6 +75,7 @@ impl From<&Stroke> for StrokeData {
 struct InfiniteCanvas {
     strokes: Vec<Stroke>,
     current_stroke: Option<Stroke>,
+    command_stack: CommandStack,
     offset: Vec2,
     zoom: f32,
     current_pressure: f32,
@@ -77,9 +87,10 @@ struct InfiniteCanvas {
 
 impl InfiniteCanvas {
     fn new() -> Self {
-        let mut c= Self {
+        let c= Self {
             strokes:Vec::new(),
             current_stroke:None,
+            command_stack: CommandStack::new(),
             offset:Vec2::ZERO,
             zoom:1.0,
             current_pressure:0.0,
@@ -102,12 +113,12 @@ impl InfiniteCanvas {
     }
 
     fn erase_stroke_at(&mut self, pos: Vec2) {
-        // If user wants eraser accurate on screen rather than world, consider dividing radius by zoom
         let radius=10.0*(1.0/self.zoom);
         let mut i=0;
         while i<self.strokes.len() {
             if stroke_intersect(&self.strokes[i], pos, radius) {
                 self.strokes.remove(i);
+                self.command_stack.push_undo(command::Command::RemoveStroke(self.strokes[i].clone()));
             } else {
                 i+=1;
             }
@@ -127,6 +138,7 @@ impl InfiniteCanvas {
             let segments = 10;
             let smoothed = catmull_rom_spline(&stroke.points, segments);
             stroke.points = smoothed;
+            self.command_stack.push_undo(command::Command::AddStroke(stroke.clone()));
             self.strokes.push(stroke);
         }
     }
@@ -169,6 +181,40 @@ impl InfiniteCanvas {
         }
     }
 
+    fn undo(&mut self) {
+        if let Some(comm) = self.command_stack.pop_undo() {
+            match comm {
+                Command::AddStroke(stroke) => {
+                    if let Some(idx) = self.strokes.iter().position(|s| *s == stroke) {
+                        self.strokes.remove(idx);
+                        self.command_stack.push_redo(Command::AddStroke(stroke));
+                    }
+                }
+                Command::RemoveStroke(stroke) => {
+                    self.strokes.push(stroke.clone());
+                    self.command_stack.push_redo(Command::RemoveStroke(stroke));
+                }
+            }
+        }
+    }
+    
+    fn redo(&mut self) {
+        if let Some(comm) = self.command_stack.pop_redo() {
+            match comm {
+                Command::AddStroke(stroke) => {
+                    self.strokes.push(stroke.clone());
+                    self.command_stack.push_undo(Command::AddStroke(stroke));
+                }
+                Command::RemoveStroke(stroke) => {
+                    if let Some(idx) = self.strokes.iter().position(|s| *s == stroke) {
+                        self.strokes.remove(idx);
+                        self.command_stack.push_undo(Command::RemoveStroke(stroke));
+                    }
+                }
+            }
+        }
+    }
+    
     fn draw(&self) {
         clear_background(WHITE);
     
@@ -250,31 +296,20 @@ fn draw_cap(
     }
 
     let arc = a1 - a0;
-    // We want exactly a half-circle (π radians). If arc > π, flip them
-    // If arc > π, it means the direct path from angle_left to angle_right is longer than half a circle.
-    // We want the shorter half circle:
+
     if arc > std::f32::consts::PI {
-        // Swap roles so we take the other semicircle
         let temp = a0;
         a0 = a1;
-        a1 = temp + std::f32::consts::TAU; // Ensure a1 > a0 again
-        let arc2 = a1 - a0;
-        // arc2 should now still represent a > π scenario if the original arc was not symmetrical
-        // Actually, with just one flip, we should now have arc2 < π if the original difference was < 2π.
-        // In rare case, just clamp arc to π by setting a1 = a0 + π to enforce exactly half circle:
+        a1 = temp + std::f32::consts::TAU; 
         let arc2 = a1 - a0;
         if arc2 > std::f32::consts::PI {
             a1 = a0 + std::f32::consts::PI;
         }
     } else {
-        // If arc < π, we directly have a small arc. We need a half-circle exactly.
-        // Just enforce a half circle:
-        // We'll just set a1 = a0 + π to create a perfect half circle:
         a1 = a0 + std::f32::consts::PI;
     }
 
     let first_cap_index = vertices.len() as u16;
-    // Center vertex of the fan
     vertices.push(Vertex {
         position: Vec3::new(center.x, center.y, 0.0),
         uv: Vec2::new(0.0,0.0),
@@ -282,7 +317,6 @@ fn draw_cap(
         normal: normal.into(),
     });
 
-    // Generate arc vertices from a0 to a1
     for j in 0..=CAP_SEGMENTS {
         let t = j as f32 / CAP_SEGMENTS as f32;
         let angle = a0 + t*(a1 - a0);
@@ -485,6 +519,12 @@ async fn main() {
         }
         if is_key_down(KeyCode::LeftControl)&&is_key_pressed(KeyCode::O) {
             canvas.load_from_json();
+        }
+        if is_key_down(KeyCode::LeftControl) && is_key_pressed(KeyCode::Z) {
+            canvas.undo();
+        }
+        if is_key_down(KeyCode::LeftControl) && is_key_pressed(KeyCode::R) {
+            canvas.redo();
         }
 
         canvas.draw();
