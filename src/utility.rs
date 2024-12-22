@@ -234,3 +234,5 @@ pub(crate) fn is_stroke_visible(stroke: &Stroke, offset: Vec2, zoom: f32, screen
     // aabb
     !(max_x < visible_left || min_x > visible_right || max_y < visible_top || min_y > visible_bottom)
 }
+
+
