@@ -1,6 +1,6 @@
 use macroquad::{
     color::{Color, BLACK},
-    math::{vec2, Vec2, Vec3},
+    math::{vec2, vec3, Vec2, Vec3, Vec3Swizzles},
     models::Mesh,
     ui::Vertex,
 };
@@ -130,85 +130,6 @@ pub(crate) fn stroke_intersect(stroke: &Stroke, pos: Vec2, radius: f32) -> bool 
     false
 }
 
-pub(crate) fn stroke_to_screen_mesh_old(points: &[(Vec2, f32)], offset: Vec2, zoom: f32) -> Option<Mesh> {
-    if points.len()<2 {
-        return None;
-    }
-
-    let n=points.len();
-    let mut vertices=Vec::with_capacity(n*2);
-    let mut indices=Vec::with_capacity((n-1)*6);
-
-    let mut directions=Vec::with_capacity(n);
-    for i in 0..n {
-        let dir=if i==n-1 {
-            let prev=points[i-1].0;
-            let curr=points[i].0;
-            (curr - prev).normalize()
-        } else {
-            let curr=points[i].0;
-            let next=points[i+1].0;
-            (next - curr).normalize()
-        };
-        directions.push(dir);
-    }
-
-    let color=Color::new(0.0,0.0,0.0,1.0);
-    let c=color_u8(color);
-    let normal=[0.0,0.0,1.0,0.0];
-
-    for i in 0..n {
-        let (pos,radius)=points[i];
-        // convert to screen coords:
-        let sx=(pos.x - offset.x)*zoom;
-        let sy=(pos.y - offset.y)*zoom;
-
-        let dir=directions[i];
-        let perp=vec2(-dir.y,dir.x);
-
-        let screen_radius = radius * zoom;
-
-        let left_pos=vec2(sx,sy) + perp * screen_radius;
-        let right_pos=vec2(sx,sy) - perp * screen_radius;
-
-        vertices.push(Vertex {
-            position: Vec3::new(left_pos.x,left_pos.y,0.0),
-            uv: Vec2::new(0.0,0.0),
-            color:c,
-            normal: normal.into(),
-        });
-
-        vertices.push(Vertex {
-            position: Vec3::new(right_pos.x,right_pos.y,0.0),
-            uv: Vec2::new(0.0,0.0),
-            color:c,
-            normal: normal.into(),
-        });
-    }
-
-    for i in 0..(n-1) {
-        let i0=(i*2)as u16;
-        let i1=(i*2+1)as u16;
-        let i2=((i+1)*2)as u16;
-        let i3=((i+1)*2+1)as u16;
-
-        indices.push(i0);
-        indices.push(i1);
-        indices.push(i2);
-
-        indices.push(i2);
-        indices.push(i1);
-        indices.push(i3);
-    }
-
-    Some(Mesh {
-        vertices,
-        indices,
-        texture:None,
-    })
-}
-
-
 pub(crate) fn stroke_bounding_box(points: &[(Vec2, f32)]) -> (f32, f32, f32, f32) {
     let mut min_x = std::f32::MAX;
     let mut max_x = std::f32::MIN;
@@ -233,4 +154,90 @@ pub(crate) fn is_stroke_visible(stroke: &Stroke, offset: Vec2, zoom: f32, screen
 
     // aabb
     !(max_x < visible_left || min_x > visible_right || max_y < visible_top || min_y > visible_bottom)
+}
+
+
+pub(crate) fn transform_mesh_o(
+    original_mesh: &Mesh,
+    transformable: &mut Mesh,
+    offset_delta: Vec2,
+    zoom_delta: f32,
+    zoom_center: Vec2,
+    current_zoom: f32,
+) {
+    for (original_vertex, transformable_vertex) in original_mesh.vertices.iter().zip(&mut transformable.vertices) {
+        // Reset transformable vertex to the original vertex position
+        transformable_vertex.position = original_vertex.position;
+
+        // Apply translation (offset) scaled by the current zoom
+        transformable_vertex.position.x -= offset_delta.x * current_zoom;
+        transformable_vertex.position.y -= offset_delta.y * current_zoom;
+
+        // Apply scaling relative to the zoom center
+        transformable_vertex.position.x = zoom_center.x
+            + (transformable_vertex.position.x - zoom_center.x) * zoom_delta;
+        transformable_vertex.position.y = zoom_center.y
+            + (transformable_vertex.position.y - zoom_center.y) * zoom_delta;
+    }
+}
+
+
+/// Takes a world-space mesh and returns a *new* mesh in screen-space
+/// by applying (offset, zoom, pivot) as an *absolute* transform.
+pub fn transform_mesh_absolute(
+    original_mesh: &Mesh,
+    offset: Vec2,
+    zoom: f32,
+    pivot: Vec2,
+) -> Mesh {
+    let mut new_vertices = Vec::with_capacity(original_mesh.vertices.len());
+
+    for v in &original_mesh.vertices {
+        let mut pos = v.position.truncate(); // world coords (x,y)
+
+        // Step 1: subtract "camera" offset in world space
+        pos -= offset;
+
+        // Step 2: apply pivot if desired
+        // For example, if pivot != (0, 0):
+        //   pos = pivot + (pos - pivot) * zoom;
+        //
+        // For simplicity (pivot = 0,0) you could do just `pos *= zoom;`.
+        // Below we show the pivot-based approach:
+        pos = pivot + (pos - pivot) * zoom;
+
+        // Build a new vertex with the transformed position.
+        let mut new_vertex = *v;
+        new_vertex.position.x = pos.x;
+        new_vertex.position.y = pos.y;
+        new_vertex.position.z = 0.0; // (assuming 2D)
+
+        new_vertices.push(new_vertex);
+    }
+
+    Mesh {
+        vertices: new_vertices,
+        indices: original_mesh.indices.clone(),
+        texture: original_mesh.texture.clone(),
+    }
+}
+
+
+
+pub(crate) fn transform_mesh(
+    mesh: &mut Mesh,
+    offset_delta: Vec2,
+    zoom_delta: f32,
+    zoom_center: Vec2,
+    current_zoom: f32,
+) {
+    for vertex in &mut mesh.vertices {
+        // Translate positions by the scaled offset delta
+        vertex.position.x -= offset_delta.x * current_zoom;
+        vertex.position.y -= offset_delta.y * current_zoom;
+
+        // Scale positions relative to the zoom center
+        vertex.position.x = zoom_center.x + (vertex.position.x - zoom_center.x) * zoom_delta;
+        vertex.position.y = zoom_center.y + (vertex.position.y - zoom_center.y) * zoom_delta;
+    }
 }

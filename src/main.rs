@@ -1,5 +1,4 @@
 mod read_stylus;
-mod mesh;
 mod utility;
 mod command;
 
@@ -13,10 +12,11 @@ use serde::{Serialize, Deserialize};
 use serde_json::{self};
 use std::fs::File;
 use std::io::{Write, Read};
-use std::ops::Index;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self};
 use std::time::{Duration, Instant};
 use utility::*;
+
+
 
 #[derive(Serialize, Deserialize)]
 struct StrokeData {
@@ -74,7 +74,7 @@ impl From<&Stroke> for StrokeData {
 
 struct InfiniteCanvas {
     strokes: Vec<Stroke>,
-    stroke_cache: Vec<Option<Mesh>>,
+    stroke_cache: Vec<Option<Vec<Mesh>>>,
     current_stroke: Option<Stroke>,
     command_stack: CommandStack,
     offset: Vec2,
@@ -142,7 +142,7 @@ impl InfiniteCanvas {
 
     fn finalize_stroke(&mut self) {
         if let Some(mut stroke)=self.current_stroke.take() {
-            //stroke.simplify(0.4); // optional
+            stroke.simplify(0.5); // optional
             let segments = 10;
             let smoothed = catmull_rom_spline(&stroke.points, segments);
             stroke.points = smoothed;
@@ -248,15 +248,6 @@ impl InfiniteCanvas {
         let offset_changed = self.offset != self.last_offset;
         let zoom_changed = (self.zoom - self.last_zoom).abs() > f32::EPSILON;
 
-        if offset_changed || zoom_changed {
-            // If offset or zoom changed, clear caches
-            for mesh_opt in &mut self.stroke_cache {
-                *mesh_opt = None;
-            }
-            self.last_offset = self.offset;
-            self.last_zoom = self.zoom;
-        }
-
         clear_background(WHITE);
 
         let a4_w = 595.0;
@@ -284,20 +275,32 @@ impl InfiniteCanvas {
             }
         }
 
-        // Only render visible strokes
         for (i, stroke) in self.strokes.iter().enumerate() {
-            if is_stroke_visible(stroke, self.offset, self.zoom, screen_w, screen_h) {
-                // If no cached mesh, build one now
+            // draw wider
+            if is_stroke_visible(stroke, self.offset, self.zoom, screen_w * 3.0, screen_h * 3.0) {
                 if self.stroke_cache[i].is_none() {
-                    self.stroke_cache[i] = stroke_to_screen_mesh(&stroke.points, self.offset, self.zoom);
+                    // build submeshes
+                    let submeshes = stroke_to_world_submeshes(&stroke.points, 800 /* random number that seems to work, dont want to think about it now */);
+                    self.stroke_cache[i] = Some(submeshes);
                 }
 
-                if let Some(ref mesh) = self.stroke_cache[i] {
-                    draw_mesh(mesh);
+                if let Some(ref submeshes) = self.stroke_cache[i] {
+                    // iter all subs
+                    for mesh in submeshes.iter() {
+                        let mut screen_mesh = transform_mesh_absolute(
+                            mesh,
+                            self.offset,
+                            self.zoom,
+                            vec2(0.0, 0.0),
+                        );
+                        draw_mesh(&mut screen_mesh);
+                    }
                 }
+            } else {
+                self.stroke_cache[i] = None;
             }
         }
-
+        
         if let Some(stroke) = &self.current_stroke {
             for i in 0..stroke.points.len() {
                 let (pos, radius) = stroke.points[i];
@@ -312,6 +315,11 @@ impl InfiniteCanvas {
                     draw_filled_trapezoid(vec2(sx,sy), radius*self.zoom, vec2(nsx,nsy), nr*self.zoom);
                 }
             }
+        }
+
+        if offset_changed || zoom_changed {
+            self.last_offset = self.offset;
+            self.last_zoom = self.zoom;
         }
     }
 }
@@ -385,70 +393,64 @@ fn draw_cap(
 }
 
 
-// create the mesh from the curent stroke
-pub(crate) fn stroke_to_screen_mesh(
-    points: &[(Vec2, f32)],
-    offset: Vec2,
-    zoom: f32
-) -> Option<Mesh> {
-    if points.len()<2 {
+// building mesh (old)
+pub(crate) fn stroke_to_world_mesh(points: &[(Vec2, f32)]) -> Option<Mesh> {
+    if points.len() < 2 {
         return None;
     }
 
-    let n=points.len();
-    let mut vertices=Vec::with_capacity(n*2);
-    let mut indices=Vec::with_capacity((n-1)*6);
+    let n = points.len();
 
-    let mut directions=Vec::with_capacity(n);
+    let mut vertices = Vec::with_capacity(n * 2);
+    let mut indices = Vec::with_capacity((n - 1) * 6);
+
+    let mut directions = Vec::with_capacity(n);
     for i in 0..n {
-        let dir=if i==n-1 {
-            let prev=points[i-1].0;
-            let curr=points[i].0;
+        // ? wtf 
+        let dir = if i == n - 1 {
+            let prev = points[i - 1].0;
+            let curr = points[i].0;
             (curr - prev).normalize()
         } else {
-            let curr=points[i].0;
-            let nxt=points[i+1].0;
+            let curr = points[i].0;
+            let nxt  = points[i + 1].0;
             (nxt - curr).normalize()
         };
         directions.push(dir);
     }
 
-    let color = Color::new(0.0,0.0,0.0,1.0);
+    let color = Color::new(0.0, 0.0, 0.0, 1.0);
     let c = color_u8(color);
-    let normal = [0.0,0.0,1.0,0.0];
+    let normal = [0.0, 0.0, 1.0, 0.0];
 
     for i in 0..n {
-        let (pos,radius)=points[i];
-        let sx=(pos.x - offset.x)*zoom;
-        let sy=(pos.y - offset.y)*zoom;
+        let (pos, radius) = points[i];
+        let dir = directions[i];
+        let perp = vec2(-dir.y, dir.x);
 
-        let dir=directions[i];
-        let perp=vec2(-dir.y, dir.x);
-        let screen_radius = radius*zoom;
-
-        let left_pos=vec2(sx,sy)+perp*screen_radius;
-        let right_pos=vec2(sx,sy)-perp*screen_radius;
+        let left_pos = pos + perp * radius;
+        let right_pos= pos - perp * radius;
 
         vertices.push(Vertex {
-            position:Vec3::new(left_pos.x,left_pos.y,0.0),
-            uv:Vec2::new(0.0,0.0),
-            color:c,
-            normal:normal.into(),
+            position: Vec3::new(left_pos.x, left_pos.y, 0.0),
+            uv: Vec2::new(0.0, 0.0),
+            color: c,
+            normal: normal.into(),
         });
 
         vertices.push(Vertex {
-            position:Vec3::new(right_pos.x,right_pos.y,0.0),
-            uv:Vec2::new(0.0,0.0),
-            color:c,
-            normal:normal.into(),
+            position: Vec3::new(right_pos.x, right_pos.y, 0.0),
+            uv: Vec2::new(0.0, 0.0),
+            color: c,
+            normal: normal.into(),
         });
     }
 
-    for i in 0..(n-1) {
-        let i0=(i*2)as u16;
-        let i1=(i*2+1)as u16;
-        let i2=((i+1)*2)as u16;
-        let i3=((i+1)*2+1)as u16;
+    for i in 0..(n - 1) {
+        let i0 = (i * 2) as u16;
+        let i1 = (i * 2 + 1) as u16;
+        let i2 = ((i + 1) * 2) as u16;
+        let i3 = ((i + 1) * 2 + 1) as u16;
 
         indices.push(i0); indices.push(i1); indices.push(i2);
         indices.push(i2); indices.push(i1); indices.push(i3);
@@ -456,16 +458,16 @@ pub(crate) fn stroke_to_screen_mesh(
 
     // draw caps
     {
-        let start_left = vertices[0].position.truncate();
-        let start_right= vertices[1].position.truncate();
-        draw_cap(&mut vertices,&mut indices, start_left,start_right,c,normal);
+        let start_left  = vertices[0].position.truncate();
+        let start_right = vertices[1].position.truncate();
+        draw_cap(&mut vertices, &mut indices, start_left, start_right, c, normal);
     }
     {
-        let end_left_i = 2*(n-1);
-        let end_right_i= 2*(n-1)+1;
-        let end_left = vertices[end_left_i as usize].position.truncate();
-        let end_right= vertices[end_right_i as usize].position.truncate();
-        draw_cap(&mut vertices,&mut indices, end_left,end_right,c,normal);
+        let end_left_i  = 2 * (n - 1);
+        let end_right_i = 2 * (n - 1) + 1;
+        let end_left  = vertices[end_left_i as usize].position.truncate();
+        let end_right = vertices[end_right_i as usize].position.truncate();
+        draw_cap(&mut vertices, &mut indices, end_left, end_right, c, normal);
     }
 
     Some(Mesh {
@@ -475,7 +477,140 @@ pub(crate) fn stroke_to_screen_mesh(
     })
 }
 
+fn build_stroke_mesh_chunk(
+    points: &[(Vec2, f32)],
+    draw_start_cap: bool,
+    draw_end_cap: bool,
+) -> Mesh {
+    if points.len() < 2 {
+        return Mesh {
+            vertices: Vec::new(),
+            indices:  Vec::new(),
+            texture:  None,
+        };
+    }
 
+    let n = points.len();
+    let mut vertices = Vec::with_capacity(n * 2);
+    let mut indices  = Vec::with_capacity((n - 1) * 6);
+
+    // direction array
+    let mut directions = Vec::with_capacity(n);
+    for i in 0..n {
+        let dir = if i == n - 1 {
+            // last point
+            let prev = points[i - 1].0;
+            let curr = points[i].0;
+            (curr - prev).normalize()
+        } else {
+            // any other point
+            let curr = points[i].0;
+            let nxt  = points[i + 1].0;
+            (nxt - curr).normalize()
+        };
+        directions.push(dir);
+    }
+
+    let color  = Color::new(0.0, 0.0, 0.0, 1.0);
+    let c      = color_u8(color);
+    let normal = [0.0, 0.0, 1.0, 0.0];
+
+    // 2 vertices per stroke point
+    for i in 0..n {
+        let (pos, radius) = points[i];
+        let dir  = directions[i];
+        let perp = vec2(-dir.y, dir.x);
+
+        let left_pos  = pos + perp * radius;
+        let right_pos = pos - perp * radius;
+
+        vertices.push(Vertex {
+            position: Vec3::new(left_pos.x, left_pos.y, 0.0),
+            uv:       Vec2::new(0.0, 0.0),
+            color:    c,
+            normal:   normal.into(),
+        });
+
+        vertices.push(Vertex {
+            position: Vec3::new(right_pos.x, right_pos.y, 0.0),
+            uv:       Vec2::new(0.0, 0.0),
+            color:    c,
+            normal:   normal.into(),
+        });
+    }
+
+    // indices 2 triangles per segment
+    for i in 0..(n - 1) {
+        let i0 = (i * 2) as u16;
+        let i1 = (i * 2 + 1) as u16;
+        let i2 = ((i + 1) * 2) as u16;
+        let i3 = ((i + 1) * 2 + 1) as u16;
+
+        indices.push(i0); indices.push(i1); indices.push(i2);
+        indices.push(i2); indices.push(i1); indices.push(i3);
+    }
+
+    if draw_start_cap {
+        // draw cap at the first segment start
+        let start_left  = vertices[0].position.truncate();
+        let start_right = vertices[1].position.truncate();
+        draw_cap(&mut vertices, &mut indices, start_left, start_right, c, normal);
+    }
+    if draw_end_cap {
+        // draw cap at the final segment end
+        let end_left_i  = 2 * (n - 1);
+        let end_right_i = 2 * (n - 1) + 1;
+        let end_left  = vertices[end_left_i as usize].position.truncate();
+        let end_right = vertices[end_right_i as usize].position.truncate();
+        draw_cap(&mut vertices, &mut indices, end_left, end_right, c, normal);
+    }
+
+    Mesh {
+        vertices,
+        indices,
+        texture: None,
+    }
+}
+
+// ? kp was hier abgeht
+pub fn stroke_to_world_submeshes(
+    points: &[(Vec2, f32)],
+    max_chunk_points: usize
+) -> Vec<Mesh> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut result = Vec::new();
+    let n = points.len();
+    let mut start = 0;
+
+    while start < n {
+        let mut end = (start + max_chunk_points).min(n - 1);
+        let is_last_chunk = end == n - 1;
+
+        if !is_last_chunk {
+            end += 1;
+        }
+
+        let sub_points = &points[start..=end];
+
+        let draw_start_cap = start == 0;
+        let draw_end_cap   = end == n - 1;
+
+        let mesh = build_stroke_mesh_chunk(sub_points, draw_start_cap, draw_end_cap);
+        result.push(mesh);
+
+        if !is_last_chunk {
+            start = end - 1;
+        } else {
+            // done
+            start = end + 1;
+        }
+    }
+
+    result
+}
 
 
 #[macroquad::main("Drawing App")]
