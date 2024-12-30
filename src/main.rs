@@ -3,7 +3,7 @@ mod utility;
 mod command;
 
 use command::{Command, CommandStack};
-use macroquad::prelude::*;
+use macroquad::{math, prelude::*};
 use miniquad::window::set_mouse_cursor;
 use miniquad::CursorIcon;
 use read_stylus::{read_input, StylusEvent};
@@ -48,12 +48,13 @@ impl Stroke {
     }
 
     fn add_point(&mut self, pos: Vec2, pressure: f32, zoom: f32) {
-        let thickness = (pressure * (1.0 / zoom)).max(0.5);
+        let thickness = pressure * (1.0 / zoom);
         self.points.push((pos, thickness));
     }
 
-    fn simplify(&mut self, epsilon: f32) {
-        self.points = ramer_douglas_peucker(&self.points, epsilon);
+    fn simplify(&mut self, epsilon: f32, zoom: f32) {
+        let epsilon_in_world = epsilon * (1.0 / zoom);
+        self.points = ramer_douglas_peucker(&self.points, epsilon_in_world);
     }
 }
 
@@ -140,9 +141,10 @@ impl InfiniteCanvas {
         }
     }
 
+    // TODO pass stroke as screern coords, so gets simplified regardless of zoom
     fn finalize_stroke(&mut self) {
-        if let Some(mut stroke)=self.current_stroke.take() {
-            stroke.simplify(0.5); // optional
+        if let Some(mut stroke) = self.current_stroke.take() {
+            stroke.simplify(1.0, self.zoom); // optional
             let segments = 10;
             let smoothed = catmull_rom_spline(&stroke.points, segments);
             stroke.points = smoothed;
@@ -150,6 +152,10 @@ impl InfiniteCanvas {
             self.strokes.push(stroke);
             self.stroke_cache.push(None);
         }
+    }
+
+    fn stroke_to_screen_cords(&self) -> Stroke {
+        todo!()   
     }
 
     fn save_to_json(&mut self) {
@@ -275,38 +281,73 @@ impl InfiniteCanvas {
             }
         }
 
-        for (i, stroke) in self.strokes.iter().enumerate() {
-            // draw wider
-            if is_stroke_visible(stroke, self.offset, self.zoom, screen_w * 3.0, screen_h * 3.0) {
-                if self.stroke_cache[i].is_none() {
-                    // build submeshes
-                    let submeshes = stroke_to_world_submeshes(&stroke.points, 800 /* random number that seems to work, dont want to think about it now */);
-                    self.stroke_cache[i] = Some(submeshes);
-                }
+        let start_total = Instant::now();
 
+        let mut meshing_time = Duration::ZERO;
+        let mut transforming_time = Duration::ZERO;
+        let mut drawing_time = Duration::ZERO;
+        let mut mesh_count = 0;
+    
+        for (i, stroke) in self.strokes.iter().enumerate() {
+            // First check the broad visibility
+            if is_stroke_visible(stroke, self.offset, self.zoom, screen_w * 5.0, screen_h * 5.0) {
+                // Only build submeshes if not cached:
+                if self.stroke_cache[i].is_none() {
+                    let meshing_start = Instant::now();
+                    let submeshes = stroke_to_world_submeshes(&stroke.points, 800);
+                    self.stroke_cache[i] = Some(submeshes);
+                    let meshing_end = Instant::now();
+                    meshing_time += meshing_end - meshing_start;
+                }
+    
+                // If we have submeshes in the cache:
                 if let Some(ref submeshes) = self.stroke_cache[i] {
-                    // iter all subs
-                    for mesh in submeshes.iter() {
-                        let mut screen_mesh = transform_mesh_absolute(
-                            mesh,
-                            self.offset,
-                            self.zoom,
-                            vec2(0.0, 0.0),
-                        );
-                        draw_mesh(&mut screen_mesh);
+                    // Now check finer visibility (screen-w sized)
+                    if is_stroke_visible(stroke, self.offset, self.zoom, screen_w, screen_h) {
+                        // For each submesh, transform + draw
+                        for mesh in submeshes.iter() {
+                            mesh_count += 1;
+                            // --- Transform timing ---
+                            let transform_start = Instant::now();
+                            let mut screen_mesh = transform_mesh_absolute(
+                                mesh,
+                                self.offset,
+                                self.zoom,
+                                vec2(0.0, 0.0),
+                            );
+                            let transform_end = Instant::now();
+                            transforming_time += transform_end - transform_start;
+    
+                            // --- Drawing timing ---
+                            let drawing_start = Instant::now();
+                            draw_mesh(&mut screen_mesh);
+                            let drawing_end = Instant::now();
+                            drawing_time += drawing_end - drawing_start;
+                        }
                     }
                 }
             } else {
+                // If not visible at all, clear the cache
                 self.stroke_cache[i] = None;
             }
         }
-        
+    
+        let end_total = Instant::now();
+        let total_time = end_total - start_total;
+    
+        // Print or log the times you measured:
+        println!(
+            "Meshing time: {:?}, Transforming time: {:?}, Drawing time: {:?}, Total time: {:?}, Mesh count: {:?}",
+            meshing_time, transforming_time, drawing_time, total_time, mesh_count
+        );
+
+
         if let Some(stroke) = &self.current_stroke {
             for i in 0..stroke.points.len() {
                 let (pos, radius) = stroke.points[i];
-                let sx = (pos.x - self.offset.x)*self.zoom;
-                let sy = (pos.y - self.offset.y)*self.zoom;
-                draw_circle(sx, sy, radius*self.zoom, BLACK);
+                let sx = (pos.x - self.offset.x) * self.zoom;
+                let sy = (pos.y - self.offset.y) * self.zoom;
+                draw_circle(sx, sy, radius * self.zoom, BLACK);
 
                 if i + 1 < stroke.points.len() {
                     let (npos, nr) = stroke.points[i+1];
@@ -390,91 +431,6 @@ fn draw_cap(
         indices.push(v1);
         indices.push(v2);
     }
-}
-
-
-// building mesh (old)
-pub(crate) fn stroke_to_world_mesh(points: &[(Vec2, f32)]) -> Option<Mesh> {
-    if points.len() < 2 {
-        return None;
-    }
-
-    let n = points.len();
-
-    let mut vertices = Vec::with_capacity(n * 2);
-    let mut indices = Vec::with_capacity((n - 1) * 6);
-
-    let mut directions = Vec::with_capacity(n);
-    for i in 0..n {
-        // ? wtf 
-        let dir = if i == n - 1 {
-            let prev = points[i - 1].0;
-            let curr = points[i].0;
-            (curr - prev).normalize()
-        } else {
-            let curr = points[i].0;
-            let nxt  = points[i + 1].0;
-            (nxt - curr).normalize()
-        };
-        directions.push(dir);
-    }
-
-    let color = Color::new(0.0, 0.0, 0.0, 1.0);
-    let c = color_u8(color);
-    let normal = [0.0, 0.0, 1.0, 0.0];
-
-    for i in 0..n {
-        let (pos, radius) = points[i];
-        let dir = directions[i];
-        let perp = vec2(-dir.y, dir.x);
-
-        let left_pos = pos + perp * radius;
-        let right_pos= pos - perp * radius;
-
-        vertices.push(Vertex {
-            position: Vec3::new(left_pos.x, left_pos.y, 0.0),
-            uv: Vec2::new(0.0, 0.0),
-            color: c,
-            normal: normal.into(),
-        });
-
-        vertices.push(Vertex {
-            position: Vec3::new(right_pos.x, right_pos.y, 0.0),
-            uv: Vec2::new(0.0, 0.0),
-            color: c,
-            normal: normal.into(),
-        });
-    }
-
-    for i in 0..(n - 1) {
-        let i0 = (i * 2) as u16;
-        let i1 = (i * 2 + 1) as u16;
-        let i2 = ((i + 1) * 2) as u16;
-        let i3 = ((i + 1) * 2 + 1) as u16;
-
-        indices.push(i0); indices.push(i1); indices.push(i2);
-        indices.push(i2); indices.push(i1); indices.push(i3);
-    }
-
-    // draw caps
-    {
-        let start_left  = vertices[0].position.truncate();
-        let start_right = vertices[1].position.truncate();
-        draw_cap(&mut vertices, &mut indices, start_left, start_right, c, normal);
-    }
-    {
-        let end_left_i  = 2 * (n - 1);
-        let end_right_i = 2 * (n - 1) + 1;
-        let end_left  = vertices[end_left_i as usize].position.truncate();
-        let end_right = vertices[end_right_i as usize].position.truncate();
-        draw_cap(&mut vertices, &mut indices, end_left, end_right, c, normal);
-    }
-
-    Some(Mesh {
-        vertices,
-        indices,
-        texture: None,
-    })
 }
 
 fn build_stroke_mesh_chunk(
@@ -629,7 +585,24 @@ async fn main() {
         while let Ok(event)=receiver.try_recv() {
             match event {
                 StylusEvent::Pressure{value}=>{
-                    canvas.current_pressure=(value as f32 / pressure_max)*3.0;
+                    let pressure = value as f32 / pressure_max;
+                    let threshold = 0.7;
+                    let minWidth = 0.0;
+                    let midWidth = 1.5;
+                    let maxWidth = 3.5;
+                    let exponentLow = 1.2;
+                    let exponentHigh = 1.6;
+                    let width;
+                    if pressure < threshold {
+                        // lower segment: gentler slope
+                        let fraction = pressure / threshold;
+                        width = minWidth + (midWidth - minWidth) * fraction.powf(exponentLow);
+                    } else {
+                        // upper segment: steeper slope
+                        let fraction = (pressure - threshold) / (1.0 - threshold);
+                        width = midWidth + (maxWidth - midWidth) * fraction.powf(exponentHigh);
+                    }
+                    canvas.current_pressure = width ;
                 }
                 StylusEvent::Key{key,value}=>{
                     if key==evdev::Key::BTN_STYLUS {
@@ -710,7 +683,7 @@ async fn main() {
         canvas.draw();
 
         if is_key_pressed(KeyCode::C) {
-            canvas.clear();
+            //canvas.clear();
         }
 
         next_frame().await;
